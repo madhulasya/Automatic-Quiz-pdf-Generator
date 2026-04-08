@@ -1,0 +1,707 @@
+
+node server.jsconst express = require('express');
+const cors = require('cors');
+const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+require('dotenv').config();
+
+const app = express();
+
+// Configure CORS
+app.use(cors({
+    origin: 'http://localhost:3000',
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE']
+}));
+
+app.use(express.json());
+
+console.log('Starting Quiz Engine Backend...');
+
+let pool;
+
+async function initializeDatabase() {
+    try {
+        pool = mysql.createPool({
+            host: process.env.DB_HOST || 'localhost',
+            user: process.env.DB_USER || 'root',
+            password: process.env.DB_PASSWORD || 'madhulasya509',
+            database: process.env.DB_NAME || 'quiz_engine',
+            waitForConnections: true,
+            connectionLimit: 10,
+            queueLimit: 0
+        });
+        
+        const connection = await pool.getConnection();
+        console.log('✅ Database connected successfully!');
+        connection.release();
+        return true;
+    } catch (error) {
+        console.error('❌ Database connection error:', error.message);
+        return false;
+    }
+}
+
+// ============ JWT AUTHENTICATION MIDDLEWARE ============
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+        return res.status(401).json({ error: 'Access denied' });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
+        if (err) {
+            return res.status(403).json({ error: 'Invalid token' });
+        }
+        req.user = user;
+        next();
+    });
+};
+// ============ END AUTHENTICATION MIDDLEWARE ============
+
+// ============ PUBLIC TEST ENDPOINTS ============
+app.get('/', (req, res) => {
+    res.json({ 
+        message: 'Quiz Engine API is running!',
+        status: 'online',
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/api/test', (req, res) => {
+    res.json({ 
+        success: true,
+        message: 'API is working!', 
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/api/test-db', async (req, res) => {
+    try {
+        if (!pool) {
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Database not connected' 
+            });
+        }
+        
+        const [result] = await pool.query('SELECT 1 as test');
+        res.json({ 
+            success: true, 
+            message: 'Database connected!',
+            result: result[0]
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// Get all modules with quiz info
+// ============ MODULES ROUTES ============
+
+/// ============ MODULES ROUTES ============
+
+// Get all modules
+// ============ MODULES ROUTE ============
+app.get('/api/modules', authenticateToken, async (req, res) => {
+    try {
+        console.log('Modules endpoint called!');
+        
+        // Return hardcoded modules for now
+        const modules = [
+            { id: 1, name: 'JavaScript', description: 'Master JavaScript fundamentals', icon: '📘', color: 'from-yellow-500 to-yellow-600', question_count: 20, time_limit: 30, passing_score: 75 },
+            { id: 2, name: 'Python', description: 'Learn Python programming', icon: '🐍', color: 'from-green-500 to-green-600', question_count: 20, time_limit: 30, passing_score: 75 },
+            { id: 3, name: 'Java', description: 'Object-oriented programming with Java', icon: '☕', color: 'from-red-500 to-red-600', question_count: 20, time_limit: 30, passing_score: 75 },
+            { id: 4, name: 'React', description: 'Build modern web apps with React.js', icon: '⚛️', color: 'from-blue-500 to-blue-600', question_count: 20, time_limit: 30, passing_score: 75 },
+            { id: 5, name: 'Node.js', description: 'Server-side JavaScript with Node.js', icon: '🚀', color: 'from-green-500 to-green-600', question_count: 20, time_limit: 30, passing_score: 75 },
+            { id: 6, name: 'SQL', description: 'Database management with SQL', icon: '🗄️', color: 'from-purple-500 to-purple-600', question_count: 20, time_limit: 30, passing_score: 75 },
+            { id: 7, name: 'HTML/CSS', description: 'Web development fundamentals', icon: '🎨', color: 'from-orange-500 to-orange-600', question_count: 20, time_limit: 30, passing_score: 75 },
+            { id: 8, name: 'TypeScript', description: 'Type-safe JavaScript development', icon: '📝', color: 'from-blue-500 to-blue-600', question_count: 20, time_limit: 30, passing_score: 75 }
+        ];
+        
+        res.json(modules);
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+// ============ END MODULES ROUTE ============
+// Get module quiz
+app.get('/api/modules/:moduleId/quiz', authenticateToken, async (req, res) => {
+    try {
+        const moduleId = req.params.moduleId;
+        console.log('📝 Fetching quiz for module:', moduleId);
+        
+        const [modules] = await pool.query('SELECT * FROM modules WHERE id = ?', [moduleId]);
+        if (modules.length === 0) {
+            return res.status(404).json({ error: 'Module not found' });
+        }
+        
+        const module = modules[0];
+        
+        // Create a default quiz for this module
+        let quizId;
+        const [existingQuiz] = await pool.query('SELECT id FROM quizzes WHERE module_id = ?', [moduleId]);
+        
+        if (existingQuiz.length === 0) {
+            const [result] = await pool.query(
+                'INSERT INTO quizzes (title, description, time_limit, passing_score, module_id) VALUES (?, ?, ?, ?, ?)',
+                [`${module.name} Quiz`, `Test your ${module.name} knowledge`, 30, 75, moduleId]
+            );
+            quizId = result.insertId;
+            
+            // Add sample questions
+            await pool.query(`
+                INSERT INTO questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, points) VALUES
+                (?, 'What is ${module.name}?', 'A programming language/technology', 'A markup language', 'A database', 'A framework', 'A', 1),
+                (?, 'Is ${module.name} popular?', 'Yes', 'No', 'Maybe', 'Not sure', 'A', 1),
+                (?, 'Can you build applications with ${module.name}?', 'Yes', 'No', 'Maybe', 'Not sure', 'A', 1)
+            `, [quizId, quizId, quizId]);
+            console.log(`✅ Created default quiz for ${module.name}`);
+        } else {
+            quizId = existingQuiz[0].id;
+        }
+        
+        const [questions] = await pool.query(
+            'SELECT id, question_text, option_a, option_b, option_c, option_d, points FROM questions WHERE quiz_id = ?',
+            [quizId]
+        );
+        
+        res.json({ 
+            module: module,
+            quiz: { id: quizId, time_limit: 30, passing_score: 75 },
+            questions: questions
+        });
+    } catch (error) {
+        console.error('❌ Error fetching module quiz:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Submit module quiz attempt
+app.post('/api/modules/:moduleId/attempt', authenticateToken, async (req, res) => {
+    try {
+        const { answers } = req.body;
+        const moduleId = req.params.moduleId;
+        
+        const [quizzes] = await pool.query('SELECT * FROM quizzes WHERE module_id = ?', [moduleId]);
+        if (quizzes.length === 0) {
+            return res.status(404).json({ error: 'Quiz not found' });
+        }
+        
+        const quiz = quizzes[0];
+        const [questions] = await pool.query('SELECT * FROM questions WHERE quiz_id = ?', [quiz.id]);
+        
+        let totalPoints = 0;
+        let earnedPoints = 0;
+        const results = [];
+        
+        for (const question of questions) {
+            totalPoints += question.points;
+            const userAnswer = answers[question.id];
+            const isCorrect = userAnswer === question.correct_answer;
+            if (isCorrect) earnedPoints += question.points;
+            
+            results.push({
+                question_id: question.id,
+                question_text: question.question_text,
+                selected_answer: userAnswer,
+                correct_answer: question.correct_answer,
+                is_correct: isCorrect,
+                points: question.points
+            });
+        }
+        
+        const percentage = Math.round((earnedPoints / totalPoints) * 100);
+        const passed = percentage >= quiz.passing_score;
+        
+        await pool.query(
+            'INSERT INTO quiz_attempts (user_id, quiz_id, score, total_points, percentage, passed, completed_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+            [req.user.id, quiz.id, earnedPoints, totalPoints, percentage, passed]
+        );
+        
+        res.json({
+            score: earnedPoints,
+            total_points: totalPoints,
+            percentage,
+            passed,
+            results
+        });
+    } catch (error) {
+        console.error('❌ Error submitting attempt:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ============ END MODULES ROUTES ============
+
+// Submit module quiz attempt
+app.post('/api/modules/:moduleId/attempt', authenticateToken, async (req, res) => {
+    try {
+        const { answers } = req.body;
+        const moduleId = req.params.moduleId;
+        
+        // Get quiz for this module
+        const [quizzes] = await pool.query('SELECT * FROM quizzes WHERE module_id = ?', [moduleId]);
+        if (quizzes.length === 0) {
+            return res.status(404).json({ error: 'Quiz not found for this module' });
+        }
+        
+        const quiz = quizzes[0];
+        
+        // Get all questions for this quiz
+        const [questions] = await pool.query('SELECT * FROM questions WHERE quiz_id = ?', [quiz.id]);
+        
+        if (questions.length === 0) {
+            return res.status(404).json({ error: 'No questions found for this quiz' });
+        }
+        
+        // Calculate score
+        let totalPoints = 0;
+        let earnedPoints = 0;
+        const results = [];
+        
+        for (const question of questions) {
+            totalPoints += question.points;
+            const userAnswer = answers[question.id];
+            const isCorrect = userAnswer === question.correct_answer;
+            
+            if (isCorrect) {
+                earnedPoints += question.points;
+            }
+            
+            results.push({
+                question_id: question.id,
+                question_text: question.question_text,
+                selected_answer: userAnswer,
+                correct_answer: question.correct_answer,
+                is_correct: isCorrect,
+                points: question.points
+            });
+        }
+        
+        const percentage = Math.round((earnedPoints / totalPoints) * 100);
+        const passed = percentage >= quiz.passing_score;
+        
+        // Save attempt
+        const connection = await pool.getConnection();
+        await connection.beginTransaction();
+        
+        try {
+            const [attemptResult] = await connection.query(
+                'INSERT INTO quiz_attempts (user_id, quiz_id, score, total_points, percentage, passed, completed_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+                [req.user.id, quiz.id, earnedPoints, totalPoints, percentage, passed]
+            );
+            
+            const attemptId = attemptResult.insertId;
+            
+            for (const result of results) {
+                await connection.query(
+                    'INSERT INTO user_answers (attempt_id, question_id, selected_answer, is_correct) VALUES (?, ?, ?, ?)',
+                    [attemptId, result.question_id, result.selected_answer, result.is_correct]
+                );
+            }
+            
+            await connection.commit();
+            
+            res.json({
+                attempt_id: attemptId,
+                score: earnedPoints,
+                total_points: totalPoints,
+                percentage,
+                passed,
+                results
+            });
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Error submitting module attempt:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ============ END MODULES ROUTES ============
+
+// Get user progress across modules
+app.get('/api/user/progress', authenticateToken, async (req, res) => {
+    try {
+        const [progress] = await pool.query(`
+            SELECT 
+                m.id as module_id,
+                m.name as module_name,
+                MAX(qa.percentage) as best_score,
+                COUNT(CASE WHEN qa.passed = TRUE THEN 1 END) as passed_attempts,
+                MAX(qa.completed_at) as last_attempt
+            FROM modules m
+            LEFT JOIN quizzes qz ON m.id = qz.module_id
+            LEFT JOIN quiz_attempts qa ON qz.id = qa.quiz_id AND qa.user_id = ?
+            GROUP BY m.id
+        `, [req.user.id]);
+        
+        res.json(progress);
+    } catch (error) {
+        console.error('Error fetching progress:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+
+});
+// ============ END PUBLIC TEST ENDPOINTS ============
+
+// ============ AUTH ENDPOINTS ============
+app.post('/api/auth/signup', async (req, res) => {
+    try {
+        const { full_name, email, password } = req.body;
+        console.log('📝 Signup attempt:', email);
+        
+        if (!full_name || !email || !password) {
+            return res.status(400).json({ 
+                error: 'All fields are required' 
+            });
+        }
+        
+        if (!pool) {
+            return res.status(500).json({ 
+                error: 'Database not connected' 
+            });
+        }
+        
+        const [existing] = await pool.query('SELECT id FROM users WHERE email = ?', [email]);
+        if (existing.length > 0) {
+            return res.status(400).json({ error: 'Email already registered' });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const [result] = await pool.query(
+            'INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, ?)',
+            [full_name, email, hashedPassword, 'user']
+        );
+
+        const token = jwt.sign(
+            { id: result.insertId, email, role: 'user', full_name },
+            process.env.JWT_SECRET || 'your-secret-key',
+            { expiresIn: '7d' }
+        );
+
+        console.log('✅ User created:', email);
+        
+        res.json({ 
+            token, 
+            user: { 
+                id: result.insertId, 
+                full_name, 
+                email, 
+                role: 'user' 
+            } 
+        });
+    } catch (error) {
+        console.error('❌ Signup error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        console.log('🔐 Login attempt:', email);
+        
+        if (!pool) {
+            return res.status(500).json({ error: 'Database not connected' });
+        }
+        
+        const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+        if (users.length === 0) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        const user = users[0];
+        const validPassword = await bcrypt.compare(password, user.password);
+        
+        if (!validPassword) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        const token = jwt.sign(
+            { id: user.id, email: user.email, role: user.role, full_name: user.full_name },
+            process.env.JWT_SECRET || 'your-secret-key',
+            { expiresIn: '7d' }
+        );
+
+        console.log('✅ User logged in:', email);
+        
+        res.json({
+            token,
+            user: {
+                id: user.id,
+                full_name: user.full_name,
+                email: user.email,
+                role: user.role
+            }
+        });
+    } catch (error) {
+        console.error('❌ Login error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============ END AUTH ENDPOINTS ============
+
+// ============ PROTECTED QUIZ ROUTES (Require Authentication) ============
+
+// Get all quizzes (for users)
+app.get('/api/quizzes', authenticateToken, async (req, res) => {
+    try {
+        const [quizzes] = await pool.query(`
+            SELECT q.*, 
+                   (SELECT COUNT(*) FROM questions WHERE quiz_id = q.id) as question_count,
+                   (SELECT COUNT(*) FROM quiz_attempts WHERE quiz_id = q.id AND user_id = ?) as attempted
+            FROM quizzes q
+            ORDER BY q.created_at DESC
+        `, [req.user.id]);
+        
+        res.json(quizzes);
+    } catch (error) {
+        console.error('Error fetching quizzes:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Get single quiz with questions
+app.get('/api/quizzes/:id', authenticateToken, async (req, res) => {
+    try {
+        const [quizzes] = await pool.query('SELECT * FROM quizzes WHERE id = ?', [req.params.id]);
+        if (quizzes.length === 0) {
+            return res.status(404).json({ error: 'Quiz not found' });
+        }
+        
+        const [questions] = await pool.query(
+            'SELECT id, question_text, option_a, option_b, option_c, option_d, points FROM questions WHERE quiz_id = ?',
+            [req.params.id]
+        );
+        
+        res.json({ quiz: quizzes[0], questions });
+    } catch (error) {
+        console.error('Error fetching quiz:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Create quiz (admin only)
+app.post('/api/admin/quizzes', authenticateToken, async (req, res) => {
+    try {
+        if (req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const { title, description, time_limit, passing_score, questions } = req.body;
+        
+        const connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        try {
+            const [quizResult] = await connection.query(
+                'INSERT INTO quizzes (title, description, time_limit, passing_score, created_by) VALUES (?, ?, ?, ?, ?)',
+                [title, description, time_limit, passing_score, req.user.id]
+            );
+            
+            const quizId = quizResult.insertId;
+            
+            for (const q of questions) {
+                await connection.query(
+                    'INSERT INTO questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, points) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [quizId, q.question_text, q.option_a, q.option_b, q.option_c, q.option_d, q.correct_answer, q.points || 1]
+                );
+            }
+            
+            await connection.commit();
+            res.json({ id: quizId, message: 'Quiz created successfully' });
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Error creating quiz:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Submit quiz attempt
+app.post('/api/admin/quizzes/:id/attempt', authenticateToken, async (req, res) => {
+    try {
+        const { answers } = req.body;
+        const quizId = req.params.id;
+        
+        const [quizzes] = await pool.query('SELECT * FROM quizzes WHERE id = ?', [quizId]);
+        if (quizzes.length === 0) {
+            return res.status(404).json({ error: 'Quiz not found' });
+        }
+        
+        const quiz = quizzes[0];
+        const [questions] = await pool.query('SELECT * FROM questions WHERE quiz_id = ?', [quizId]);
+        
+        let totalPoints = 0;
+        let earnedPoints = 0;
+        const results = [];
+        
+        for (const question of questions) {
+            totalPoints += question.points;
+            const userAnswer = answers[question.id];
+            const isCorrect = userAnswer === question.correct_answer;
+            
+            if (isCorrect) {
+                earnedPoints += question.points;
+            }
+            
+            results.push({
+                question_id: question.id,
+                question_text: question.question_text,
+                selected_answer: userAnswer,
+                correct_answer: question.correct_answer,
+                is_correct: isCorrect,
+                points: question.points
+            });
+        }
+        
+        const percentage = Math.round((earnedPoints / totalPoints) * 100);
+        const passed = percentage >= quiz.passing_score;
+        
+        const connection = await pool.getConnection();
+        await connection.beginTransaction();
+        
+        try {
+            const [attemptResult] = await connection.query(
+                'INSERT INTO quiz_attempts (user_id, quiz_id, score, total_points, percentage, passed, completed_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+                [req.user.id, quizId, earnedPoints, totalPoints, percentage, passed]
+            );
+            
+            const attemptId = attemptResult.insertId;
+            
+            for (const result of results) {
+                await connection.query(
+                    'INSERT INTO user_answers (attempt_id, question_id, selected_answer, is_correct) VALUES (?, ?, ?, ?)',
+                    [attemptId, result.question_id, result.selected_answer, result.is_correct]
+                );
+            }
+            
+            await connection.commit();
+            
+            res.json({
+                attempt_id: attemptId,
+                score: earnedPoints,
+                total_points: totalPoints,
+                percentage,
+                passed,
+                results
+            });
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Error submitting attempt:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Get user's quiz attempts
+app.get('/api/user/attempts', authenticateToken, async (req, res) => {
+    try {
+        const [attempts] = await pool.query(`
+            SELECT qa.*, q.title as quiz_title, q.passing_score
+            FROM quiz_attempts qa
+            JOIN quizzes q ON qa.quiz_id = q.id
+            WHERE qa.user_id = ?
+            ORDER BY qa.attempted_at DESC
+        `, [req.user.id]);
+        
+        res.json(attempts);
+    } catch (error) {
+        console.error('Error fetching attempts:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Admin: Get all quizzes with stats
+app.get('/api/admin/quizzes', authenticateToken, async (req, res) => {
+    try {
+        if (req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        const [quizzes] = await pool.query(`
+            SELECT q.*, 
+                   COUNT(DISTINCT qa.id) as total_attempts,
+                   AVG(qa.percentage) as avg_score
+            FROM quizzes q
+            LEFT JOIN quiz_attempts qa ON q.id = qa.quiz_id
+            GROUP BY q.id
+            ORDER BY q.created_at DESC
+        `);
+        
+        res.json(quizzes);
+    } catch (error) {
+        console.error('Error fetching admin quizzes:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Admin: Delete quiz
+app.delete('/api/admin/quiz/:id', authenticateToken, async (req, res) => {
+    try {
+        if (req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        
+        const quizId = req.params.id;
+        const [result] = await pool.query('DELETE FROM quizzes WHERE id = ?', [quizId]);
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Quiz not found' });
+        }
+        
+        res.json({ message: 'Quiz deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting quiz:', error);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+// ============ END PROTECTED QUIZ ROUTES ============
+
+// ============ START SERVER ============
+const PORT = process.env.PORT || 5002;
+
+initializeDatabase().then(() => {
+    app.listen(PORT, () => {
+        console.log(`\n🚀 Server running on http://localhost:${PORT}`);
+        console.log(`📡 Available endpoints:`);
+        console.log(`\n  PUBLIC ENDPOINTS:`);
+        console.log(`   GET  http://localhost:${PORT}/`);
+        console.log(`   GET  http://localhost:${PORT}/api/test`);
+        console.log(`   GET  http://localhost:${PORT}/api/test-db`);
+        console.log(`   POST http://localhost:${PORT}/api/auth/signup`);
+        console.log(`   POST http://localhost:${PORT}/api/auth/login`);
+        console.log(`\n  PROTECTED ENDPOINTS (Require Authentication):`);
+        console.log(`   GET  http://localhost:${PORT}/api/quizzes`);
+        console.log(`   GET  http://localhost:${PORT}/api/quizzes/:id`);
+        console.log(`   POST http://localhost:${PORT}/api/quizzes`);
+        console.log(`   POST http://localhost:${PORT}/api/quizzes/:id/attempt`);
+        console.log(`   GET  http://localhost:${PORT}/api/user/attempts`);
+        console.log(`   GET  http://localhost:${PORT}/api/admin/quizzes`);
+        console.log(`   DELETE http://localhost:${PORT}/api/admin/quiz/:id`);
+        console.log(`\n✨ Ready to accept requests!\n`);
+    });
+}).catch(err => {
+    console.error('Failed to start server:', err);
+});
